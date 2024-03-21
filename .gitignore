@@ -41,6 +41,7 @@ results*.csv
 coco/
 coco128/
 VOC/
+fathomnet_2023_dataset
 
 coco2017labels-segments.zip
 test2017.zip
