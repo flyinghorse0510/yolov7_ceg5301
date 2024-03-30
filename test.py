@@ -17,6 +17,16 @@ from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized, TracedModel
 
+# FGSM attack code
+def fgsm_attack(image, epsilon, data_grad):
+    # Collect the element-wise sign of the data gradient
+    sign_data_grad = data_grad.sign()
+    # Create the perturbed image by adjusting each pixel of the input image
+    perturbed_image = image + epsilon*sign_data_grad
+    # Adding clipping to maintain [0,1] range
+    perturbed_image = torch.clamp(perturbed_image, 0, 1)
+    # Return the perturbed image
+    return perturbed_image
 
 def test(data,
          weights=None,
@@ -40,35 +50,45 @@ def test(data,
          half_precision=True,
          trace=False,
          is_coco=False,
-         v5_metric=False):
+         v5_metric=False,
+         attack=False,
+         opt=None):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
         device = next(model.parameters()).device  # get model device
 
-    else:  # called directly
-        set_logging()
-        device = select_device(opt.device, batch_size=batch_size)
+    if attack or training:  # called directly
+        
+        if not attack:
+            set_logging()
+            device = select_device(opt.device, batch_size=batch_size)
 
         # Directories
         save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
         (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
-        model = attempt_load(weights, map_location=device)  # load FP32 model
-        gs = max(int(model.stride.max()), 32)  # grid size (max stride)
+        evalModel = attempt_load(weights, map_location=device)  # load FP32 model
+        gs = max(int(evalModel.stride.max()), 32)  # grid size (max stride)
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
         
         if trace:
-            model = TracedModel(model, device, imgsz)
+            evalModel = TracedModel(evalModel, device, imgsz)
 
+        evalModel.eval()
+
+    if not attack:
+        evalModel = model
     # Half
     half = device.type != 'cpu' and half_precision  # half precision only supported on CUDA
+    half = False # CEG5303, forced to disable
     if half:
         model.half()
 
     # Configure
-    model.eval()
+    model.train()
+    evalModel.eval()
     if isinstance(data, str):
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
@@ -83,7 +103,7 @@ def test(data,
     if wandb_logger and wandb_logger.wandb:
         log_imgs = min(wandb_logger.log_imgs, 100)
     # Dataloader
-    if not training:
+    if not training and not attack:
         if device.type != 'cpu':
             model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
@@ -108,14 +128,27 @@ def test(data,
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
+        if attack:
+            img.requires_grad = True
+            # Run model
+            t = time_synchronized()
+            pred = model(img)  # inference and training outputs
+            t0 += time_synchronized() - t
+            localLoss, localLossItems = compute_loss(pred, targets)
+            model.zero_grad()
+            localLoss.backward()
+            imgGrad = img.grad.data
+            attackedImg = fgsm_attack(img, 0.01, imgGrad)
+            img = attackedImg
+
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            out, train_out = evalModel(img, augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss
-            if compute_loss:
+            if compute_loss is not None:
                 loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
 
             # Run NMS
@@ -277,7 +310,7 @@ def test(data,
             print(f'pycocotools unable to run: {e}')
 
     # Return results
-    model.float()  # for training
+    evalModel.float()  # for training
     if not training:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")
@@ -330,12 +363,13 @@ if __name__ == '__main__':
              save_hybrid=opt.save_hybrid,
              save_conf=opt.save_conf,
              trace=not opt.no_trace,
-             v5_metric=opt.v5_metric
+             v5_metric=opt.v5_metric,
+             opt=opt
              )
 
     elif opt.task == 'speed':  # speed benchmarks
         for w in opt.weights:
-            test(opt.data, w, opt.batch_size, opt.img_size, 0.25, 0.45, save_json=False, plots=False, v5_metric=opt.v5_metric)
+            test(opt.data, w, opt.batch_size, opt.img_size, 0.25, 0.45, save_json=False, plots=False, v5_metric=opt.v5_metric, opt=opt)
 
     elif opt.task == 'study':  # run over a range of settings and save/plot
         # python test.py --task study --data coco.yaml --iou 0.65 --weights yolov7.pt
@@ -346,7 +380,7 @@ if __name__ == '__main__':
             for i in x:  # img-size
                 print(f'\nRunning {f} point {i}...')
                 r, _, t = test(opt.data, w, opt.batch_size, i, opt.conf_thres, opt.iou_thres, opt.save_json,
-                               plots=False, v5_metric=opt.v5_metric)
+                               plots=False, v5_metric=opt.v5_metric, opt=opt)
                 y.append(r + t)  # results and times
             np.savetxt(f, y, fmt='%10.4g')  # save
         os.system('zip -r study.zip study_*.txt')
