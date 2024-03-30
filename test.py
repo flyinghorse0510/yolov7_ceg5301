@@ -78,7 +78,7 @@ def test(data,
 
         evalModel.eval()
 
-    if not attack:
+    if not attack and not training:
         evalModel = model
     # Half
     half = device.type != 'cpu' and half_precision  # half precision only supported on CUDA
@@ -138,7 +138,7 @@ def test(data,
             model.zero_grad()
             localLoss.backward()
             imgGrad = img.grad.data
-            attackedImg = fgsm_attack(img, 0.01, imgGrad)
+            attackedImg = fgsm_attack(img, opt.epsilon, imgGrad)
             img = attackedImg
 
         with torch.no_grad():
@@ -342,6 +342,7 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--no-trace', action='store_true', help='don`t trace model')
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
+    parser.add_argument('--epsilon', default=0.0, type=float, help="FGSM attack parameters")
     opt = parser.parse_args()
     opt.save_json |= opt.data.endswith('coco.yaml')
     opt.data = check_file(opt.data)  # check file

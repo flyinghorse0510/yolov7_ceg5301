@@ -535,6 +535,7 @@ if __name__ == "__main__":
     parser.add_argument("--attack", action="store_true", help="augmented inference")
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.65, help='IOU threshold for NMS')
+    parser.add_argument('--epsilon', default=0.0, type=float, help="FGSM attack parameters")
     opt = parser.parse_args()
 
     # Set DDP variables
